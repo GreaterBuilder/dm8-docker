@@ -1,37 +1,71 @@
-# 达梦数据库容器化部署
+# 达梦 DM8 ARM64 镜像（dm8_20260708_HWarm920_kylin10_sp1_64）
 
-## 下载安装包
-[官网下载](https://eco.dameng.com/download/)  
-操作系统版本选择rhel7或者CentOS7版
+在原仓库 [GreaterBuilder/dm8-docker](https://github.com/GreaterBuilder/dm8-docker)（x86/centos:7）基础上改成 ARM64 版，
+在 aarch64 Linux 上直接出镜像。
 
-## 获取安装文件
-1. 解压官网下载的安装包文件`dm8_20251020_x86_win_64.zip`
-1. 挂载解压后得到的`dm8_20250506_x86_rh7_64.iso`镜像文件
-1. 复制出挂载后的`DMInstall.bin`安装文件
+## 文件
+
+| 文件 | 说明 |
+|---|---|
+| `Dockerfile` | 多阶段构建，基础镜像 `almalinux:8`（aarch64，glibc 2.28，与麒麟 V10 SP1 一致） |
+| `docker-entrypoint.sh` | 首次启动自动 `dminit` 建库，之后拉起 `dmserver` |
+| `build.sh` | 解包 `zip → ISO → DMInstall.bin` 并构建 |
+| `.dockerignore` | 只上传 Dockerfile / entrypoint / DMInstall.bin |
 
 ## 构建
-1. 将`DMInstall.bin`与`Dockerfile`和`docker-entrypoint.sh`文件放置于同一目录下
-1. 进行目录内执行`docker build -t dm8 .`
-> 构建阶段可用的`--build-arg`参数列表
-> 1. `DM_INSTALL_DIR`达梦数据库程序安装位置，默认值为`/opt/dm8`
-> 1. `DM_DATA_DIR`达梦数据库数据存储目录，默认值为`/mnt/data/dm8`
+
+把 `dm8_20260708_HWarm920_kylin10_sp1_64.zip` 和这几个文件放同一目录：
+
+```bash
+bash build.sh                     # 自动找当前目录的 dm8_*.zip
+# 或
+bash build.sh /path/dm8_20260708_HWarm920_kylin10_sp1_64.zip
+```
+
+不用脚本（已手工取出 `DMInstall.bin` 时）：
+
+```bash
+docker build -t dm8:arm64 .
+```
+
+## 关键改动
+
+1. **基础镜像** `centos:7` → `almalinux:8`（aarch64；centos:7 无 arm64）。
+   要换成真麒麟镜像：`--build-arg BASE_IMAGE=kylin:v10-sp1 --build-arg FAKE_KYLIN=0`。
+2. **OS 校验**：安装器只认麒麟，`FAKE_KYLIN=1`（默认）把 `/etc/os-release` 伪装成
+   `Kylin Linux Advanced Server V10 (SP1)`，否则 ARM 安装包会因“系统不支持”退出。
+3. **架构保护**：安装阶段校验 `uname -m`，非 aarch64 直接报错退出，不会静默装出一堆废文件。
+4. **安装包**：自动 `zip → iso → DMInstall.bin`（zip 里直接是 bin 也支持），带 7z/bsdtar/loop 挂载三种解 ISO 方式。
+5. **entrypoint 修复**：原版 `declare -g` 是 bash 专属（dash 下报错）；`CASE_SENSITIVE` 定义了却没写进
+   `dminit` 应答文件。现在 `CASE_SENSITIVE`/`PORT_NUM`/`PAGE_SIZE`/`CHARSET`/`TIME_ZONE` 全部生效。
+6. **依赖**：补 `libaio`、`libnsl`、`ncurses-compat-libs`（disql 需要 `libncurses.so.5`）。
+7. **构建上下文**：`.dockerignore` 排掉 zip/iso，避免几 GB 数据推给 daemon。
 
 ## 运行
+
 ```bash
 docker run -d --name dm8 -p 5236:5236 \
-    -v /mnt/data/dm8:/mnt/data/dm8 \
-    -e SYSDBA_PWD=DMdba_123 \
-    -e SYSAUDITOR_PWD=DMauditor_123 \
-    dm8:latest
-``` 
-> 可用的环境变量参数列表
-> 1. `DEFAULT_DB_NAME`默认数据库名，默认值`DAMENG`
-> 1. `INSTANCE_NAME`数据库实例名，默认值`DMSERVER`
-> 1. `CASE_SENSITIVE`区分大小写，默认值`Y`
-> 1. `SYSDBA_PWD`SYSDBA用户的密码，默认值`DMdba_123`
-> 1. `SYSAUDITOR_PWD`SYSAUDITOR用户的密码，默认值`DMauditor_123`
+  -v /mnt/data/dm8:/mnt/data/dm8 \
+  -e SYSDBA_PWD=DMdba_123 \
+  -e SYSAUDITOR_PWD=DMauditor_123 \
+  dm8:arm64
+```
 
-## 官方配置文档
-[Linux安装文档](https://eco.dameng.com/document/dm/zh-cn/start/install-dm-linux-prepare.html)  
-[dminit文档](https://eco.dameng.com/document/dm/zh-cn/pm/dminit-function-introduction.html)  
-[静默安装配置文件](https://eco.dameng.com/document/dm/zh-cn/pm/dm8-appendix.html#5.2%20%E9%9D%99%E9%BB%98%E5%AE%89%E8%A3%85%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6%E6%A8%A1%E6%9D%BF)  
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `DATABASE_NAME` | `DAMENG` | 库名 |
+| `INSTANCE_NAME` | `DMSERVER` | 实例名 |
+| `PORT_NUM` | `5236` | 端口 |
+| `CASE_SENSITIVE` | `Y` | 大小写敏感（仅建库时生效） |
+| `PAGE_SIZE` | `16` | 页大小 |
+| `CHARSET` | `1` | 1=UTF-8，0=GB18030 |
+| `TIME_ZONE` | `+08:00` | 时区 |
+| `SYSDBA_PWD` / `SYSAUDITOR_PWD` | `DMdba_123` / `DMauditor_123` | 密码 |
+
+## 排错
+
+- **`exec format error`**：装的不是 aarch64 包 / 构建时平台不对。`bash build.sh` 已强制 `--platform linux/arm64`。
+- **“操作系统版本不支持”**：`FAKE_KYLIN` 被设成 0 了，或基础镜像不是 EL 系。
+- **找不到 `DMInstall.bin`**：`unzip -l 包名.zip` 看下结构；若不是 iso 套 bin，把列表发我。
+- **`unable to find image` / 拉取慢**：`--build-arg BASE_IMAGE=你的加速器/almalinux:8`。
+- **bind mount 后启动 `Permission denied`**：`sudo chown -R 12001:12001 /mnt/data/dm8`。
