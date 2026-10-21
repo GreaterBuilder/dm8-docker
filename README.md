@@ -1,37 +1,55 @@
-# 达梦数据库容器化部署
+# 达梦 DM8 镜像（dm8_20260710_x86_rh7_64）
 
-## 下载安装包
-[官网下载](https://eco.dameng.com/download/)  
-操作系统版本选择rhel7或者CentOS7版
+## 文件
 
-## 获取安装文件
-1. 解压官网下载的安装包文件`dm8_20251020_x86_win_64.zip`
-1. 挂载解压后得到的`dm8_20250506_x86_rh7_64.iso`镜像文件
-1. 复制出挂载后的`DMInstall.bin`安装文件
+| 文件 | 说明 |
+|---|---|
+| `Dockerfile` | `almalinux:8` 打底 + 伪装 CentOS 7 + rh7 包安装 + 瘦身，多阶段 |
+| `startup.sh` | 首启 `dminit` 建库、之后拉起 `dmserver`；自动跳过新版不支持的 dminit 参数 |
+| `.dockerignore` | 不把 zip/iso 送进构建上下文 |
 
 ## 构建
-1. 将`DMInstall.bin`与`Dockerfile`和`docker-entrypoint.sh`文件放置于同一目录下
-1. 进行目录内执行`docker build -t dm8 .`
-> 构建阶段可用的`--build-arg`参数列表
-> 1. `DM_INSTALL_DIR`达梦数据库程序安装位置，默认值为`/opt/dm8`
-> 1. `DM_DATA_DIR`达梦数据库数据存储目录，默认值为`/mnt/data/dm8`
+
+```bash
+# 1) 取 DMInstall.bin（放到本目录，和 Dockerfile 同级）
+mkdir -p pkg && unzip -o dm8_20260710_x86_rh7_64.zip -d pkg
+ISO=$(find pkg -name '*.iso' | head -1)
+7z x -y -o./iso "$ISO" || (mkdir -p /mnt/dm8iso && mount -o loop,ro "$ISO" /mnt/dm8iso && cp /mnt/dm8iso/DMInstall.bin ./iso/ && umount /mnt/dm8iso)
+cp ./iso/DMInstall.bin . && chmod +x DMInstall.bin
+
+# 2) 构建
+docker build -t dm8:20260710_x86_rh7_64 .
+```
 
 ## 运行
-```bash
-docker run -d --name dm8 -p 5236:5236 \
-    -v /mnt/data/dm8:/mnt/data/dm8 \
-    -e SYSDBA_PWD=DMdba_123 \
-    -e SYSAUDITOR_PWD=DMauditor_123 \
-    dm8:latest
-``` 
-> 可用的环境变量参数列表
-> 1. `DEFAULT_DB_NAME`默认数据库名，默认值`DAMENG`
-> 1. `INSTANCE_NAME`数据库实例名，默认值`DMSERVER`
-> 1. `CASE_SENSITIVE`区分大小写，默认值`Y`
-> 1. `SYSDBA_PWD`SYSDBA用户的密码，默认值`DMdba_123`
-> 1. `SYSAUDITOR_PWD`SYSAUDITOR用户的密码，默认值`DMauditor_123`
 
-## 官方配置文档
-[Linux安装文档](https://eco.dameng.com/document/dm/zh-cn/start/install-dm-linux-prepare.html)  
-[dminit文档](https://eco.dameng.com/document/dm/zh-cn/pm/dminit-function-introduction.html)  
-[静默安装配置文件](https://eco.dameng.com/document/dm/zh-cn/pm/dm8-appendix.html#5.2%20%E9%9D%99%E9%BB%98%E5%AE%89%E8%A3%85%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6%E6%A8%A1%E6%9D%BF)  
+```bash
+docker run -d --name dm8 --restart=always -p 5236:5236 \
+  -v dm8data:/opt/dmdbms/data \
+  --ulimit nofile=65536:65536 -e TZ=Asia/Shanghai \
+  -e SYSDBA_PWD='ChangeMe_123' -e SYSAUDITOR_PWD='ChangeMe_123' \
+  -e UNICODE_FLAG=1 -e PAGE_SIZE=16 -e EXTENT_SIZE=16 \
+  dm8:20260710_x86_rh7_64
+```
+
+## 构建参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `BASE_IMAGE` | `almalinux:8` | 支持 aarch64 时也可换 `openeuler/openeuler:22.03-lts` |
+| `DM_ARCH` | `x86_64` | 架构校验 |
+| `DM_INSTALL_DIR` / `DM_DATA_DIR` | `/opt/dmdbms` / `/opt/dmdbms/data` | 目录 |
+| `FAKE_OS` | `1` | 伪装 `/etc/os-release`、`/etc/redhat-release` 为 CentOS 7 |
+| `SLIM` | `1` | 删 `jdk/tool/doc/samples/drivers`（要用 DTS/管理工具就设 0） |
+
+## 环境变量（`docker run -e`）
+
+`MODE`、`DB_NAME`、`INSTANCE_NAME`、`PORT_NUM`、`PAGE_SIZE`、`EXTENT_SIZE`、`CASE_SENSITIVE`、`UNICODE_FLAG`（0=GB18030，1=UTF-8）、`LENGTH_IN_CHAR`、`BLANK_PAD_MODE`、`BUFFER`、`LOG_SIZE`、`SYSDBA_PWD`、`SYSAUDITOR_PWD`、`TIME_ZONE`。
+以上建库参数**只在首次初始化生效**，改之前清空数据目录。
+
+## 说明
+
+- **DM 8.4 移除了 `LENGTH_IN_CHAR`**，`startup.sh` 会先跑 `dminit help` 探测，不认识就跳过并告警，不会因此起不来。
+- 密码规则（8.4）：8~48 位，必须同时含大写、小写、数字；`SYSDBA_PWD` 与 `SYSAUDITOR_PWD` 必须同时给出。
+- 初始化被中断会留下只有 `dm.ini` 没有 `dm.ctl` 的残库，脚本会直接报错提示清空数据目录，而不是带着残库反复重启。
+- 开发版 license 到期 `2027-07-07`，正式交付前把 `dm.key` 放到 `/opt/dmdbms/bin/dm.key`。
